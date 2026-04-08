@@ -54,12 +54,13 @@ import { getLogger } from '../logger';
 import { bundleContains, createTestProject, withTestContext } from '../test.setup';
 import { AuditEventOutcome, createAuditEvent, ReadInteraction, RestfulOperationType } from '../util/auditevent';
 import { getRepoForLogin } from './accesspolicy';
-import { getSystemRepo, Repository, setTypedPropertyValue } from './repo';
+import { getGlobalSystemRepo, getProjectSystemRepo, Repository, setTypedPropertyValue } from './repo';
 import { SelectQuery } from './sql';
 
 jest.mock('hibp');
 
 describe('FHIR Repo', () => {
+  const globalSystemRepo = getGlobalSystemRepo();
   let testProject: WithId<Project>;
 
   let testProjectRepo: Repository;
@@ -73,10 +74,11 @@ describe('FHIR Repo', () => {
     const config = await loadTestConfig();
     await initAppServices(config);
 
-    testProject = await getSystemRepo().createResource({
+    testProject = await globalSystemRepo.createResource({
       resourceType: 'Project',
       id: randomUUID(),
     });
+    systemRepo = await getProjectSystemRepo(testProject);
     testProjectRepo = new Repository({
       projects: [testProject],
       extendedMode: true,
@@ -90,12 +92,8 @@ describe('FHIR Repo', () => {
     await shutdownApp();
   });
 
-  beforeEach(() => {
-    systemRepo = getSystemRepo();
-  });
-
   test('getRepoForLogin', async () => {
-    await expect(() =>
+    await expect(
       getRepoForLogin({
         login: { resourceType: 'Login' } as Login,
         membership: {
@@ -106,7 +104,7 @@ describe('FHIR Repo', () => {
         project: testProject,
         userConfig: {} as UserConfiguration,
       })
-    ).rejects.toThrow('Invalid author reference');
+    ).rejects.toThrow('Invalid reference');
   });
 
   test('Read resource with undefined id', async () => {
@@ -232,8 +230,6 @@ describe('FHIR Repo', () => {
 
     beforeAll(async () =>
       withTestContext(async () => {
-        systemRepo ??= getSystemRepo();
-
         versions.v1 = await systemRepo.createResource<Patient>({
           resourceType: 'Patient',
           meta: {
@@ -351,7 +347,7 @@ describe('FHIR Repo', () => {
         name: [{ given: ['Update1'], family: 'Update1' }],
       });
 
-      const patient2 = await systemRepo.updateResource<Patient>({
+      const patient2 = await systemRepo.updateResource({
         ...(patient1 as Patient),
       });
 
@@ -570,7 +566,7 @@ describe('FHIR Repo', () => {
       expect((rest as Patient).id).toBeUndefined();
 
       try {
-        await systemRepo.updateResource<Patient>(rest);
+        await systemRepo.updateResource(rest);
         fail('Should have thrown');
       } catch (err) {
         expect((err as OperationOutcomeError).outcome).toMatchObject(badRequest('Missing id'));
@@ -634,6 +630,20 @@ describe('FHIR Repo', () => {
           { ifMatch: 'bad-id' }
         )
       ).rejects.toThrow(new OperationOutcomeError(preconditionFailed));
+    }));
+
+  test('Patch resource with implicit array creation', () =>
+    withTestContext(async () => {
+      const patient = await systemRepo.createResource<Patient>({
+        resourceType: 'Patient',
+        name: [{ family: 'Test' }],
+      });
+
+      const patched = await systemRepo.patchResource<Patient>(patient.resourceType, patient.id, [
+        { op: 'add', path: '/identifier/-', value: { system: 'https://example.com', value: '123' } },
+      ]);
+      expect(patched.identifier?.at(0)?.system).toStrictEqual('https://example.com');
+      expect(patched.identifier?.at(0)?.value).toStrictEqual('123');
     }));
 
   test('Compartment permissions', () =>
@@ -1002,7 +1012,7 @@ describe('FHIR Repo', () => {
     withTestContext(async () => {
       const { repo } = await createTestProject({ withRepo: true });
 
-      const profile = await repo.createResource<StructureDefinition>({
+      const profile = await repo.createResource({
         ...usCorePatientProfile,
         url: 'urn:uuid:' + randomUUID(),
       });
@@ -1089,7 +1099,7 @@ describe('FHIR Repo', () => {
       assert(commLang.binding.strength === 'extensible');
       commLang.binding.strength = 'required';
 
-      profile = await repo.createResource<StructureDefinition>({
+      profile = await repo.createResource({
         ...modifiedPatientProfile,
         url: 'urn:uuid:' + randomUUID(),
       });
@@ -1380,7 +1390,7 @@ describe('FHIR Repo', () => {
           { reference: 'Practitioner?identifier=http://hl7.org.fhir/sid/us-npi|' + practitionerIdentifier },
         ],
       };
-      await expect(systemRepo.createResource<Patient>(patient)).rejects.toThrow(/did not match any resources/);
+      await expect(systemRepo.createResource(patient)).rejects.toThrow(/did not match any resources/);
     }));
 
   test('Conditional reference resolution multiple matches', async () =>
@@ -1401,7 +1411,7 @@ describe('FHIR Repo', () => {
           { reference: 'Practitioner?identifier=http://hl7.org.fhir/sid/us-npi|' + practitionerIdentifier },
         ],
       };
-      await expect(systemRepo.createResource<Patient>(patient)).rejects.toThrow();
+      await expect(systemRepo.createResource(patient)).rejects.toThrow();
     }));
 
   test('Conditional reference replaced before validation', async () =>
@@ -1411,7 +1421,7 @@ describe('FHIR Repo', () => {
         resourceType: 'Patient',
         identifier: [{ value: mrn }],
       };
-      await systemRepo.createResource<Patient>(patient);
+      await systemRepo.createResource(patient);
 
       const serviceRequest = {
         resourceType: 'ServiceRequest',
@@ -1517,7 +1527,7 @@ describe('FHIR Repo', () => {
   });
   async function getProjectIdColumn(id: string): Promise<string | null> {
     const projectIdQuery = new SelectQuery('User').column('projectId').where('id', '=', id);
-    const client = getSystemRepo().getDatabaseClient(DatabaseMode.WRITER);
+    const client = systemRepo.getDatabaseClient(DatabaseMode.WRITER);
     return (await projectIdQuery.execute(client))[0].projectId;
   }
 
@@ -1556,7 +1566,6 @@ describe('FHIR Repo', () => {
 
   test('Handles caching of profile from linked project', async () =>
     withTestContext(async () => {
-      const systemRepo = getSystemRepo();
       const { membership, project } = await registerNew({
         firstName: randomUUID(),
         lastName: randomUUID(),
@@ -1572,7 +1581,7 @@ describe('FHIR Repo', () => {
         email: randomUUID() + '@example.com',
         password: randomUUID(),
       });
-      const updatedProject = await systemRepo.updateResource({
+      const updatedProject = await globalSystemRepo.updateResource({
         ...project,
         link: [{ project: createReference(project2) }],
       });
@@ -1643,7 +1652,7 @@ describe('FHIR Repo', () => {
     }));
 
   test.each(['commit', 'rollback'])('Post-commit handling on %s', async (mode) => {
-    const repo = getSystemRepo();
+    const repo = systemRepo;
     const loggerErrorSpy = jest.spyOn(getLogger(), 'error').mockImplementation(() => {});
     const finalPostCommit = jest.fn();
 
@@ -1706,7 +1715,7 @@ describe('FHIR Repo', () => {
 
       await repo.withTransaction(async (client) => {
         const querySpy = jest.spyOn(client, 'query');
-        await repo.createResource<Patient>(patient);
+        await repo.createResource(patient);
         const calls = querySpy.mock.calls;
         expect(calls.filter((c) => c[0].includes('INSERT INTO "Patient"'))).toHaveLength(1);
         expect(calls.filter((c) => c[0].includes('INSERT INTO "Patient_History"'))).toHaveLength(1);
@@ -1798,7 +1807,7 @@ describe('FHIR Repo', () => {
       let project = regResult.project;
 
       // add linkedProject to `Project.link`
-      project = await getSystemRepo().updateResource({
+      project = await globalSystemRepo.updateResource({
         ...project,
         link: [{ project: createReference(linkedProject) }],
       });

@@ -17,15 +17,17 @@ import type {
   AccessPolicy,
   AccessPolicyIpAccessRule,
   AccessPolicyResource,
+  Bot,
+  ClientApplication,
   Project,
   ProjectMembership,
   ProjectMembershipAccess,
   Reference,
-  Resource,
 } from '@medplum/fhirtypes';
 import { getLogger } from '../logger';
 import type { AuthState } from '../oauth/middleware';
-import { getSystemRepo, Repository } from './repo';
+import type { SystemRepository } from './repo';
+import { getGlobalSystemRepo, getProjectSystemRepo, Repository } from './repo';
 import { applySmartScopes } from './smart';
 
 export type PopulatedAccessPolicy = AccessPolicy & { resource: AccessPolicyResource[] };
@@ -42,21 +44,23 @@ export type PopulatedAccessPolicy = AccessPolicy & { resource: AccessPolicyResou
 export async function getRepoForLogin(authState: AuthState, extendedMode?: boolean): Promise<Repository> {
   const { login, membership: realMembership, onBehalfOfMembership } = authState;
   const membership = onBehalfOfMembership ?? realMembership;
-  const systemRepo = getSystemRepo();
   const accessPolicy = await getAccessPolicyForLogin(authState);
 
-  const refs: Reference[] = [membership.project, realMembership.profile];
-  const resolved = await systemRepo.readReferences<Resource>(refs);
-
-  if (resolved[0] instanceof Error) {
-    throw resolved[0];
+  const globalSystemRepo = getGlobalSystemRepo();
+  let profile: WithId<ProfileResource | Bot | ClientApplication> | undefined = authState.profile;
+  if (!profile) {
+    try {
+      profile = await globalSystemRepo.readReference<ProfileResource | Bot | ClientApplication>(realMembership.profile);
+    } catch (err: unknown) {
+      if (!(err instanceof OperationOutcomeError && isNotFound(err.outcome))) {
+        throw err;
+      }
+    }
   }
-  const project = resolved[0] as WithId<Project>;
-  let profile: WithId<ProfileResource> | undefined;
-  if (isResource(resolved[1])) {
-    profile = resolved[1] as WithId<ProfileResource>;
-  } else if (!(resolved[1] instanceof OperationOutcomeError && isNotFound(resolved[1].outcome))) {
-    throw resolved[1];
+
+  let project = authState.project;
+  if (membership.project.reference !== realMembership.project.reference) {
+    project = await globalSystemRepo.readReference<Project>(membership.project);
   }
 
   const allowedProjects: WithId<Project>[] = [project];
@@ -68,6 +72,7 @@ export async function getRepoForLogin(authState: AuthState, extendedMode?: boole
       }
     }
 
+    const systemRepo = await getProjectSystemRepo(project);
     const linkedProjectsOrError = await systemRepo.readReferences<Project>(linkedProjectRefs);
     for (let i = 0; i < linkedProjectsOrError.length; i++) {
       const linkedProjectOrError = linkedProjectsOrError[i];
@@ -136,12 +141,14 @@ export async function buildAccessPolicy(membership: ProjectMembership): Promise<
     access.push(...membership.access);
   }
 
+  const systemRepo = await getProjectSystemRepo(membership.project);
   let compartment: Reference | undefined = undefined;
   const resourcePolicies: AccessPolicyResource[] = [];
   const ipAccessRules: AccessPolicyIpAccessRule[] = [];
   const accessPolicyMap = new Map<string, AccessPolicy>();
   for (const entry of access) {
     const replaced = await buildAccessPolicyResources(
+      systemRepo,
       entry,
       membership.profile as Reference<ProfileResource>,
       accessPolicyMap
@@ -179,17 +186,18 @@ export async function buildAccessPolicy(membership: ProjectMembership): Promise<
 
 /**
  * Reads an access policy and replaces all variables.
+ * @param systemRepo - The system repository.
  * @param access - The access policy and parameters.
  * @param profile - The user profile.
  * @param accessPolicyMap - Map of already-fetched access policies to avoid redundant lookups.
  * @returns The AccessPolicy with variables resolved.
  */
 async function buildAccessPolicyResources(
+  systemRepo: SystemRepository,
   access: ProjectMembershipAccess,
   profile: Reference<ProfileResource>,
   accessPolicyMap: Map<string, AccessPolicy>
 ): Promise<AccessPolicy> {
-  const systemRepo = getSystemRepo();
   const accessPolicyReference = access.policy;
   const policyReferenceString = getReferenceString(accessPolicyReference);
   if (!isString(policyReferenceString)) {
@@ -277,6 +285,7 @@ function applyProjectAdminAccessPolicy(
       criteria: `Project?_id=${resolveId(membership.project)}`,
       readonlyFields: ['features', 'link', 'systemSetting'],
       hiddenFields: ['superAdmin', 'systemSecret', 'strictMode'],
+      interaction: ['read', 'vread', 'update', 'history', 'create', 'search'], // Everything except delete
     });
 
     if (project.link) {
@@ -301,6 +310,18 @@ function applyProjectAdminAccessPolicy(
         resourceType: 'User',
         hiddenFields: ['passwordHash', 'mfaSecret'],
         readonlyFields: ['email', 'emailVerified', 'mfaEnrolled', 'project'],
+      },
+      {
+        resourceType: 'Package',
+        readonly: true,
+      },
+      {
+        resourceType: 'PackageRelease',
+        readonly: true,
+      },
+      {
+        resourceType: 'PackageInstallation',
+        readonly: true,
       }
     );
   } else {

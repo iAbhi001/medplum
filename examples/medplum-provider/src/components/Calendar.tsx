@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { useCallback, useState, useEffect } from 'react';
-import type { JSX } from 'react';
 import { Button, Group, SegmentedControl, Title } from '@mantine/core';
 import type { Appointment, Slot } from '@medplum/fhirtypes';
-import { Calendar as ReactBigCalendar, dayjsLocalizer } from 'react-big-calendar';
-import type { Event, SlotInfo, ToolbarProps, View } from 'react-big-calendar';
+import { IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
 import dayjs from 'dayjs';
 import timezone from 'dayjs/plugin/timezone';
 import utc from 'dayjs/plugin/utc';
-import { IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
+import type { JSX } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import type { Event, SlotInfo, ToolbarProps, View } from 'react-big-calendar';
+import { Calendar as ReactBigCalendar, dayjsLocalizer } from 'react-big-calendar';
 import 'react-big-calendar/lib/css/react-big-calendar.css';
 import type { Range } from '../types/scheduling';
 import { SchedulingTransientIdentifier } from '../utils/scheduling';
@@ -139,7 +139,7 @@ export function Calendar(props: {
   onRangeChange?: (range: Range) => void;
 }): JSX.Element {
   const [view, setView] = useState<View>('week');
-  const [date, setDate] = useState<Date>(new Date());
+  const [date, setDate] = useState(new Date());
   const [range, setRange] = useState<Range | undefined>();
 
   const { onRangeChange } = props;
@@ -189,28 +189,30 @@ export function Calendar(props: {
   const backgroundEvents = slotsToEvents(props.slots.filter((slot) => !SchedulingTransientIdentifier.get(slot)));
 
   return (
-    <ReactBigCalendar
-      components={{ toolbar: CalendarToolbar }}
-      view={view}
-      date={date}
-      localizer={dayjsLocalizer(dayjs)}
-      events={events}
-      // Background events don't show in the month view
-      backgroundEvents={backgroundEvents}
-      onNavigate={(newDate: Date, newView: View) => {
-        setDate(newDate);
-        setView(newView);
-      }}
-      onRangeChange={handleRangeChange}
-      onSelectSlot={props.onSelectInterval}
-      onSelectEvent={handleSelectEvent}
-      onView={setView}
-      // Default scroll to current time
-      scrollToTime={date}
-      selectable
-      eventPropGetter={eventPropGetter}
-      style={props.style}
-      dayLayoutAlgorithm="no-overlap"
-    />
+    <div data-testid="calendar">
+      <ReactBigCalendar
+        components={{ toolbar: CalendarToolbar }}
+        view={view}
+        date={date}
+        localizer={dayjsLocalizer(dayjs)}
+        events={events}
+        // Background events don't show in the month view
+        backgroundEvents={backgroundEvents}
+        onNavigate={(newDate: Date, newView: View) => {
+          setDate(newDate);
+          setView(newView);
+        }}
+        onRangeChange={handleRangeChange}
+        onSelectSlot={props.onSelectInterval}
+        onSelectEvent={handleSelectEvent}
+        onView={setView}
+        // Default scroll to current time
+        scrollToTime={date}
+        selectable
+        eventPropGetter={eventPropGetter}
+        style={props.style}
+        dayLayoutAlgorithm="no-overlap"
+      />
+    </div>
   );
 }
